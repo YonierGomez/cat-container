@@ -79,7 +79,7 @@ jobs:
         id: changelog
         run: |
           VERSION="${{ needs.check_version.outputs.version }}"
-          MAJOR_MINOR=$(echo "$VERSION" | grep -oP '^\d+\.\d+')
+          MAJOR_MINOR=$(echo "$VERSION" | grep -oE '^[0-9]+\.[0-9]+')
           
           # Descargar changelog de nginx.org
           NOTES=$(curl -sL "https://nginx.org/en/CHANGES" | \
