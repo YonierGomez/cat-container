@@ -70,6 +70,13 @@ El repo tiene dos workflows:
 | CI/CD | GitHub Actions (free tier) |
 | Registry | Docker Hub |
 
+## Sponsor
+
+Si te resulta útil este proyecto, considera apoyarlo:
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/yoniergomez)
+[![GitHub Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/YonierGomez)
+
 ## Autor
 
 [yonier.com](https://www.yonier.com)
