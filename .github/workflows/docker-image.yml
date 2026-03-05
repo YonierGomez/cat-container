@@ -18,7 +18,7 @@ jobs:
       - name: Obtener versión de nginx en Alpine
         id: upstream
         run: |
-          VERSION=$(docker run --rm nginx:alpine sh -c "nginx -v 2>&1 | grep -oP '\d+\.\d+\.\d+'")
+          VERSION=$(docker run --rm nginx:alpine sh -c "nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Versión upstream: $VERSION"
 
