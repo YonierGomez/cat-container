@@ -1,0 +1,36 @@
+name: PR Build Test
+
+on:
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build_test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (sin push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: neytor/catcontainer:pr-test
+
+      - name: Test container
+        run: |
+          docker build -t catcontainer-test .
+          docker run -d --name test -p 8080:80 catcontainer-test
+          sleep 2
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
+          echo "HTTP status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "Health check falló"
+            docker logs test
+            exit 1
+          fi
+          echo "Container respondiendo correctamente"
+          docker stop test

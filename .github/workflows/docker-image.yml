@@ -1,40 +1,138 @@
-name: Docker Image CI
+name: Docker Multi-Arch Auto-Release
 
 on:
-  push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
-  workflow_dispatch: # Agrega esta entrada para habilitar la ejecución manual
-    branches: [ "master", "main" ] # Opcional: restringe las ramas donde se puede ejecutar
+  schedule:
+    - cron: '0 8 * * 1' # Lunes a las 8:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-
-  build_push_image:
-
+  check_version:
     runs-on: ubuntu-latest
-
+    outputs:
+      new_version: ${{ steps.compare.outputs.new_version }}
+      version: ${{ steps.compare.outputs.version }}
     steps:
-    - uses: actions/checkout@v4
-      name: Download codigo from repo
-      
-    - name: Docker Login
-      uses: docker/login-action@v3.1.0
-      with:
-        registry: docker.io
-        username: ${{ secrets.USER_HUB }}
-        password: ${{ secrets.PASS_HUB }}
-        
-    
-    - name: Build and push the Docker image latest
-      run: |
-        docker build . --file Dockerfile --tag neytor/catcontainer && 
-        docker image ls && docker push neytor/catcontainer
+      - name: Obtener versión de nginx en Alpine
+        id: upstream
+        run: |
+          VERSION=$(docker run --rm nginx:alpine sh -c "nginx -v 2>&1 | grep -oP '\d+\.\d+\.\d+'")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Versión upstream: $VERSION"
 
-    - name: Build and push the Docker image with tag
-      run: |
-        docker build . --file Dockerfile --tag neytor/catcontainer:v.fe.41 && \
-        docker image ls && docker push neytor/catcontainer:v.fe.41
-      
-    
+      - name: Obtener último release del repo
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CURRENT=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "none")
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "Versión actual del repo: $CURRENT"
 
+      - name: Comparar versiones
+        id: compare
+        run: |
+          UPSTREAM="${{ steps.upstream.outputs.version }}"
+          CURRENT="${{ steps.current.outputs.current }}"
+          if [ "$CURRENT" = "$UPSTREAM" ] || [ "$CURRENT" = "v$UPSTREAM" ]; then
+            echo "new_version=false" >> "$GITHUB_OUTPUT"
+            echo "Sin cambios. Upstream=$UPSTREAM, Repo=$CURRENT"
+          else
+            echo "new_version=true" >> "$GITHUB_OUTPUT"
+            echo "version=$UPSTREAM" >> "$GITHUB_OUTPUT"
+            echo "Nueva versión detectada: $UPSTREAM (anterior: $CURRENT)"
+          fi
+
+  build_and_release:
+    needs: check_version
+    if: needs.check_version.outputs.new_version == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login en Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.USER_HUB }}
+          password: ${{ secrets.PASS_HUB }}
+
+      - name: Build y push multi-arch
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: |
+            neytor/catcontainer:latest
+            neytor/catcontainer:${{ needs.check_version.outputs.version }}
+
+      - name: Obtener changelog de nginx upstream
+        id: changelog
+        run: |
+          VERSION="${{ needs.check_version.outputs.version }}"
+          MAJOR_MINOR=$(echo "$VERSION" | grep -oP '^\d+\.\d+')
+          
+          # Descargar changelog de nginx.org
+          NOTES=$(curl -sL "https://nginx.org/en/CHANGES" | \
+            sed -n "/Changes with nginx $VERSION/,/Changes with nginx /p" | \
+            head -n -1)
+          
+          if [ -z "$NOTES" ]; then
+            NOTES="Actualización a nginx $VERSION. Ver changelog completo en https://nginx.org/en/CHANGES"
+          fi
+          
+          # Escapar para multiline output
+          {
+            echo "notes<<ENDOFNOTES"
+            echo "$NOTES"
+            echo "ENDOFNOTES"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Crear GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check_version.outputs.version }}
+        run: |
+          cat > release_body.md <<EOF
+          ## 🐱 catcontainer $VERSION
+
+          Imagen Docker basada en **nginx:alpine** con build multi-arquitectura.
+
+          ### Changelog nginx upstream
+
+          ${{ steps.changelog.outputs.notes }}
+
+          ### Tags disponibles
+
+          \`\`\`
+          docker pull neytor/catcontainer:latest
+          docker pull neytor/catcontainer:$VERSION
+          \`\`\`
+
+          ### Arquitecturas soportadas
+
+          | Arquitectura | Plataforma |
+          |---|---|
+          | x86_64 | \`linux/amd64\` |
+          | ARM 64-bit | \`linux/arm64\` |
+          | ARM 32-bit v7 | \`linux/arm/v7\` |
+
+          ### Uso rápido
+
+          \`\`\`bash
+          docker run -d -p 8080:80 neytor/catcontainer
+          \`\`\`
+          EOF
+
+          gh release create "$VERSION" \
+            --title "catcontainer $VERSION" \
+            --notes-file release_body.md

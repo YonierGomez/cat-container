@@ -1,61 +1,57 @@
-# Contenerizamos el gato
-## Cat container image
-=============================================================================
-## Referencia rápida
+# 🐱 Container Cat
 
+Imagen Docker ultra-liviana basada en **nginx:alpine** con build multi-arquitectura y auto-release.
 
-- **¿Un gato en un container?**
-- **¿Cuál es nuestro uso?**
-- **¿Cómo usar esta imagen?**
-- **Arquitectura soportada**
-- **Te invito a visitar mi web**
+Cada semana, un workflow de GitHub Actions detecta si hay nueva versión de nginx, hace build para 3 arquitecturas y crea un release con el changelog del upstream. Todo automático.
 
-# ¿Un gato en un container?
+![Container Cat](containercat.jpg)
 
-Este container escucha por el puerto 80, docker es mágia, tanto así que podrás meter un gato en un container.
-
-[![JJh6sZN.md.png](https://iili.io/JJh6sZN.md.png)](https://freeimage.host/i/JJh6sZN)
-
-## ¿Cuál es nuestro uso?
-
- ### docker cli
- Crear container y exponer el puerto 8080 para tu browser `http://localhost:8080/` o `http://laipdemimaquina:8080/`
+## Uso rápido
 
 ```bash
-
-$ docker run --name catcontainer -d -p 8080:80 neytor/catcontainer
-
+docker run -d -p 8080:80 neytor/catcontainer
 ```
 
-### docker-compose (recomendado)
+Abre `http://localhost:8080` en tu navegador.
+
+## Docker Compose
+
 ```yaml
----
-version: '3'
 services:
   catcontainer:
-  image: neytor/catcontainer
-  restart: always
-  ports:
-  - 8080:80
-  networks:
-  - mynet
-networks:
-  mynet:
-...
+    image: neytor/catcontainer
+    restart: always
+    ports:
+      - 8080:80
 ```
-## Arquitectura soportada
 
-La arquitectura soportada es la siguiente:
+## Arquitecturas soportadas
 
-| Arquitectura | Disponible | Tag descarga |
-| ------------ | ---------- | ---------------------------- |
-| x86-64 | ✅ | docker pull neytor/catcontainer |
-| arm64 | ✅ | docker pull neytor/catcontainer:arm |
+| Arquitectura | Plataforma | Disponible |
+|---|---|---|
+| x86_64 | `linux/amd64` | ✅ |
+| ARM 64-bit | `linux/arm64` | ✅ |
+| ARM 32-bit v7 | `linux/arm/v7` | ✅ |
 
+```bash
+# Pull para una arquitectura específica
+docker pull --platform linux/arm64 neytor/catcontainer
+```
 
-[![Try in PWD](https://github.com/play-with-docker/stacks/raw/cff22438cb4195ace27f9b15784bbb497047afa7/assets/images/button.png)](http://play-with-docker.com?stack=https://raw.githubusercontent.com/docker-library/docs/db214ae34137ab29c7574f5fbe01bc4eaea6da7e/wordpress/stack.yml)
+## CI/CD
 
+El repo tiene dos workflows:
 
-## Te invito a visitar mi web
+- **PR Build Test**: cada PR hace build + health check sin pushear a Docker Hub
+- **Auto-Release**: cada lunes revisa si hay nueva versión de nginx, hace build multi-arch, push a Docker Hub y crea un GitHub Release con changelog
 
-Puedes ver nuevos eventos en [https://www.yonier.com/](https://www.yonier.com)
+## Stack
+
+- **Base**: nginx:alpine (~7MB)
+- **Build**: QEMU + Docker Buildx
+- **CI/CD**: GitHub Actions (plan gratuito, sin runners ARM)
+- **Registry**: Docker Hub
+
+## Autor
+
+[yonier.com](https://www.yonier.com)
