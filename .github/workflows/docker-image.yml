@@ -2,137 +2,218 @@ name: Docker Multi-Arch Auto-Release
 
 on:
   schedule:
-    - cron: '0 8 * * 1' # Lunes a las 8:00 UTC
+    - cron: '0 8 * * 1'  # Every Monday 08:00 UTC
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build even if nginx version unchanged'
+        required: false
+        type: choice
+        default: 'false'
+        options:
+          - 'true'
+          - 'false'
+      skip_release:
+        description: 'Build and push Docker image but skip GitHub Release creation'
+        required: false
+        type: choice
+        default: 'false'
+        options:
+          - 'true'
+          - 'false'
 
 permissions:
   contents: write
 
 jobs:
-  check_version:
+  # ── Phase 1: detect whether a new nginx version is available ─────────────────
+  check-version:
     runs-on: ubuntu-latest
     outputs:
-      new_version: ${{ steps.compare.outputs.new_version }}
-      version: ${{ steps.compare.outputs.version }}
+      version: ${{ steps.get_version.outputs.version }}
+      should_build: ${{ steps.compare.outputs.should_build }}
+
     steps:
-      - name: Obtener versión de nginx en Alpine
-        id: upstream
+      - name: Get nginx version from nginx:alpine
+        id: get_version
         run: |
-          VERSION=$(docker run --rm nginx:alpine sh -c "nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'")
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Versión upstream: $VERSION"
+          VERSION=$(docker run --rm nginx:alpine sh -c "nginx -v 2>&1" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected nginx version: $VERSION"
 
-      - name: Obtener último release del repo
-        id: current
+      - name: Get latest GitHub release tag
+        id: get_release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          CURRENT=$(gh release view --repo ${{ github.repository }} --json tagName --jq '.tagName' 2>/dev/null || echo "none")
-          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
-          echo "Versión actual del repo: $CURRENT"
+          LATEST=$(gh release list \
+            --repo ${{ github.repository }} \
+            --limit 1 \
+            --json tagName \
+            --jq '.[0].tagName // ""')
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
+          echo "Latest release: $LATEST"
 
-      - name: Comparar versiones
+      - name: Decide whether to build
         id: compare
         run: |
-          UPSTREAM="${{ steps.upstream.outputs.version }}"
-          CURRENT="${{ steps.current.outputs.current }}"
-          if [ "$CURRENT" = "$UPSTREAM" ] || [ "$CURRENT" = "v$UPSTREAM" ]; then
-            echo "new_version=false" >> "$GITHUB_OUTPUT"
-            echo "Sin cambios. Upstream=$UPSTREAM, Repo=$CURRENT"
+          CURRENT="${{ steps.get_version.outputs.version }}"
+          LATEST="${{ steps.get_release.outputs.latest }}"
+          FORCE="${{ github.event.inputs.force_build }}"
+          if [[ "$CURRENT" != "$LATEST" || "$FORCE" == "true" ]]; then
+            echo "should_build=true"  >> $GITHUB_OUTPUT
+            echo "Build needed: current=$CURRENT, latest_release=$LATEST, force=$FORCE"
           else
-            echo "new_version=true" >> "$GITHUB_OUTPUT"
-            echo "version=$UPSTREAM" >> "$GITHUB_OUTPUT"
-            echo "Nueva versión detectada: $UPSTREAM (anterior: $CURRENT)"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            echo "No new version — skipping build."
           fi
 
-  build_and_release:
-    needs: check_version
-    if: needs.check_version.outputs.new_version == 'true'
-    runs-on: ubuntu-latest
+  # ── Phase 2: build per-arch on native runners (no QEMU) ──────────────────────
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
     steps:
       - uses: actions/checkout@v6.0.2
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4.0.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.0.0
 
-      - name: Login en Docker Hub
+      - name: Log in to Docker Hub
         uses: docker/login-action@v4.0.0
         with:
-          registry: docker.io
           username: ${{ secrets.USER_HUB }}
           password: ${{ secrets.PASS_HUB }}
 
-      - name: Build y push multi-arch
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v7.0.0
         with:
           context: .
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: |
-            neytor/catcontainer:latest
-            neytor/catcontainer:${{ needs.check_version.outputs.version }}
+          outputs: type=image,name=neytor/catcontainer,push-by-digest=true,name-canonical=true,push=true
 
-      - name: Obtener changelog de nginx upstream
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: digest-${{ matrix.runner }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Phase 3: merge digests into multi-arch manifest ──────────────────────────
+  build-and-push:
+    needs: [check-version, build]
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v8.0.1
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.0.0
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4.0.0
+        with:
+          username: ${{ secrets.USER_HUB }}
+          password: ${{ secrets.PASS_HUB }}
+
+      - name: Create and push multi-arch manifest
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          docker buildx imagetools create \
+            -t neytor/catcontainer:latest \
+            -t neytor/catcontainer:${VERSION} \
+            $(printf 'neytor/catcontainer@sha256:%s ' $(ls /tmp/digests))
+
+
+  # ── Phase 4: GitHub Release with changelog ────────────────────────────────────
+  release:
+    needs: [check-version, build-and-push]
+    if: needs.check-version.outputs.should_build == 'true' && github.event.inputs.skip_release != 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check if release already exists
+        id: check_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTS=$(gh release view "${{ needs.check-version.outputs.version }}" \
+            --repo ${{ github.repository }} 2>/dev/null && echo "true" || echo "false")
+          echo "exists=$EXISTS" >> $GITHUB_OUTPUT
+
+      - name: Get nginx changelog
         id: changelog
         run: |
-          VERSION="${{ needs.check_version.outputs.version }}"
-          MAJOR_MINOR=$(echo "$VERSION" | grep -oE '^[0-9]+\.[0-9]+')
-          
-          # Descargar changelog de nginx.org
+          VERSION="${{ needs.check-version.outputs.version }}"
           NOTES=$(curl -sL "https://nginx.org/en/CHANGES" | \
             sed -n "/Changes with nginx $VERSION/,/Changes with nginx /p" | \
             head -n -1)
-          
-          if [ -z "$NOTES" ]; then
-            NOTES="Actualización a nginx $VERSION. Ver changelog completo en https://nginx.org/en/CHANGES"
-          fi
-          
-          # Escapar para multiline output
-          {
-            echo "notes<<ENDOFNOTES"
-            echo "$NOTES"
-            echo "ENDOFNOTES"
-          } >> "$GITHUB_OUTPUT"
+          [ -z "$NOTES" ] && NOTES="See https://nginx.org/en/CHANGES"
+          echo "$NOTES" > /tmp/nginx_changelog.txt
 
-      - name: Crear GitHub Release
+      - name: Create GitHub Release
+        if: steps.check_release.outputs.exists == 'false'
         env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.check_version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cat > release_body.md <<EOF
-          ## 🐱 catcontainer $VERSION
+          VERSION="${{ needs.check-version.outputs.version }}"
+          CHANGELOG=$(cat /tmp/nginx_changelog.txt)
 
-          Imagen Docker basada en **nginx:alpine** con build multi-arquitectura.
+          cat > /tmp/release-notes.md << NOTES
+          ## catcontainer ${VERSION}
 
-          ### Changelog nginx upstream
+          ### Docker Images
 
-          ${{ steps.changelog.outputs.notes }}
-
-          ### Tags disponibles
-
-          \`\`\`
+          \`\`\`bash
           docker pull neytor/catcontainer:latest
-          docker pull neytor/catcontainer:$VERSION
+          docker pull neytor/catcontainer:${VERSION}
           \`\`\`
 
-          ### Arquitecturas soportadas
+          ### Supported Architectures
 
-          | Arquitectura | Plataforma |
+          | Architecture | Tag |
           |---|---|
-          | x86_64 | \`linux/amd64\` |
-          | ARM 64-bit | \`linux/arm64\` |
-          | ARM 32-bit v7 | \`linux/arm/v7\` |
+          | linux/amd64 | \`latest\`, \`${VERSION}\` |
+          | linux/arm64 | \`latest\`, \`${VERSION}\` |
 
-          ### Uso rápido
+          ### nginx Changelog
+
+          \`\`\`
+          ${CHANGELOG}
+          \`\`\`
+
+          ### Quick Start
 
           \`\`\`bash
           docker run -d -p 8080:80 neytor/catcontainer
           \`\`\`
-          EOF
+          NOTES
 
           gh release create "$VERSION" \
-            --title "catcontainer $VERSION" \
-            --notes-file release_body.md
+            --repo ${{ github.repository }} \
+            --title "nginx $VERSION" \
+            --notes-file /tmp/release-notes.md
